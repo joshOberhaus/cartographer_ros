@@ -34,6 +34,7 @@
 #include "rosbag/view.h"
 #include "tf2_eigen/tf2_eigen.h"
 #include "tf2_msgs/TFMessage.h"
+#include "geometry_msgs/Twist.h"
 
 DEFINE_string(bag_filename, "",
               "Bag file containing TF messages of the trajectory that will be "
@@ -81,39 +82,61 @@ void Run(const std::string& pbstream_filename,
   rosbag::Bag bag;
   bag.open(bag_filename, rosbag::bagmode::Read);
   rosbag::View view(bag);
-  std::vector<double> deviation_translation, deviation_rotation;
+  std::vector<double> deviation_translation, deviation_rotation, x_vel, ang_vel;
   const double signal_maximum = std::numeric_limits<double>::max();
+  cartographer::common::Time previous_time;
+  cartographer::transform::Rigid3d previous_rigid3d;
+  bool init = false;
   for (const rosbag::MessageInstance& message : view) {
-    if (!message.isType<tf2_msgs::TFMessage>()) {
-      continue;
+    if (message.isType<tf2_msgs::TFMessage>()) 
+    {
+      auto tf_message = message.instantiate<tf2_msgs::TFMessage>();
+      for (const auto& transform : tf_message->transforms) 
+      {
+        if (transform.header.frame_id != FLAGS_tf_parent_frame ||
+            transform.child_frame_id != FLAGS_tf_child_frame) {
+          continue;
+        }
+        const cartographer::common::Time transform_time =
+            FromRos(message.getTime());
+        if (!transform_interpolation_buffer.Has(transform_time)) {
+          deviation_translation.push_back(signal_maximum);
+          deviation_rotation.push_back(signal_maximum);
+          continue;
+        }
+        auto optimized_transform =
+            transform_interpolation_buffer.Lookup(transform_time);
+        auto published_transform = ToRigid3d(transform);
+        deviation_translation.push_back((published_transform.translation() -
+                                        optimized_transform.translation())
+                                            .norm());
+        deviation_rotation.push_back(
+            published_transform.rotation().angularDistance(
+                optimized_transform.rotation()));
+
+        std::chrono::duration<double, std::milli>  delta_time = transform_time - previous_time;
+
+        // some sanity check, this might be the init case, too
+        if (init)
+        {
+          auto delta_translation = optimized_transform.translation() - previous_rigid3d.translation();
+          x_vel.push_back(std::real(delta_translation(0)) / delta_time.count());
+        }
+        previous_time = transform_time;
+        previous_rigid3d = transform_interpolation_buffer.Lookup(transform_time);
+        init = true;
+      }
     }
-    auto tf_message = message.instantiate<tf2_msgs::TFMessage>();
-    for (const auto& transform : tf_message->transforms) {
-      if (transform.header.frame_id != FLAGS_tf_parent_frame ||
-          transform.child_frame_id != FLAGS_tf_child_frame) {
-        continue;
-      }
-      const cartographer::common::Time transform_time =
-          FromRos(message.getTime());
-      if (!transform_interpolation_buffer.Has(transform_time)) {
-        deviation_translation.push_back(signal_maximum);
-        deviation_rotation.push_back(signal_maximum);
-        continue;
-      }
-      auto optimized_transform =
-          transform_interpolation_buffer.Lookup(transform_time);
-      auto published_transform = ToRigid3d(transform);
-      deviation_translation.push_back((published_transform.translation() -
-                                       optimized_transform.translation())
-                                          .norm());
-      deviation_rotation.push_back(
-          published_transform.rotation().angularDistance(
-              optimized_transform.rotation()));
+    else if (message.isType<geometry_msgs::Twist>())
+    {
+        const cartographer::common::Time transform_time =
+            FromRos(message.getTime());
     }
   }
   bag.close();
-  LOG(INFO) << "Distribution of translation difference:\n"
-            << QuantilesToString(&deviation_translation);
+  LOG(INFO) << "Distribution of translation difference:\n";
+  for (std::vector<double>::const_iterator i = x_vel.begin(); i != x_vel.end(); ++i)
+    LOG(INFO) << *i << ' ';
   LOG(INFO) << "Distribution of rotation difference:\n"
             << QuantilesToString(&deviation_rotation);
   LOG(INFO) << "Fraction of translation difference smaller than 1m: "
