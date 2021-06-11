@@ -87,6 +87,10 @@ void Run(const std::string& pbstream_filename,
   cartographer::common::Time previous_time;
   cartographer::transform::Rigid3d previous_rigid3d;
   bool init = false;
+  std::ofstream outputCsv;
+  cartographer::common::Time initTime;
+  outputCsv.open("results.csv");
+
   for (const rosbag::MessageInstance& message : view) {
     if (message.isType<tf2_msgs::TFMessage>()) 
     {
@@ -114,26 +118,43 @@ void Run(const std::string& pbstream_filename,
             published_transform.rotation().angularDistance(
                 optimized_transform.rotation()));
 
-        std::chrono::duration<double, std::milli>  delta_time = transform_time - previous_time;
 
-        // some sanity check, this might be the init case, too
-        if (init)
-        {
-          auto delta_translation = optimized_transform.translation() - previous_rigid3d.translation();
-          x_vel.push_back(std::real(delta_translation(0)) / delta_time.count());
-        }
-        previous_time = transform_time;
-        previous_rigid3d = transform_interpolation_buffer.Lookup(transform_time);
-        init = true;
       }
     }
     else if (message.isType<geometry_msgs::Twist>())
     {
         const cartographer::common::Time transform_time =
             FromRos(message.getTime());
+        
+        std::chrono::duration<double, std::milli>  delta_time = transform_time - previous_time;
+        std::chrono::duration<double, std::milli>  csv_time = transform_time - initTime;
+
+        if (!transform_interpolation_buffer.Has(transform_time))
+        {
+          continue;
+        }
+
+        // some sanity check, this might be the init case, too
+        if (init)
+        {
+          auto optimized_transform =
+              transform_interpolation_buffer.Lookup(transform_time);
+          auto delta_translation = optimized_transform.translation() - previous_rigid3d.translation();
+          double vel = std::sqrt( std::pow(std::real(delta_translation(0)), 2) +  std::pow(std::real(delta_translation(1)) , 2)) / delta_time.count();
+          outputCsv << csv_time.count() << "," << vel << std::endl;
+        }
+        else
+        {
+          initTime = transform_time;
+          init = true;
+        }
+        previous_time = transform_time;
+        previous_rigid3d = transform_interpolation_buffer.Lookup(transform_time);
+
     }
   }
   bag.close();
+  outputCsv.close();
   LOG(INFO) << "Distribution of translation difference:\n";
   for (std::vector<double>::const_iterator i = x_vel.begin(); i != x_vel.end(); ++i)
     LOG(INFO) << *i << ' ';
