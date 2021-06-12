@@ -137,11 +137,12 @@ void Run(const std::string& pbstream_filename,
         // some sanity check, this might be the init case, too
         if (init)
         {
+          auto twist_message = message.instantiate<geometry_msgs::Twist>();
           auto optimized_transform =
               transform_interpolation_buffer.Lookup(transform_time);
           auto delta_translation = optimized_transform.translation() - previous_rigid3d.translation();
           double vel = std::sqrt( std::pow(std::real(delta_translation(0)), 2) +  std::pow(std::real(delta_translation(1)) , 2)) / delta_time.count();
-          outputCsv << csv_time.count() << "," << vel << std::endl;
+          outputCsv << csv_time.count() << "," << vel << "," << twist_message->linear.x << std::endl;
         }
         else
         {
